@@ -3,64 +3,85 @@
  */
 package classLoaders
 
-import java.io.File
-import kotlin.util.measureTimeMillis
 import com.intellij.util.lang.UrlClassLoader
+import java.io.File
+import java.net.URL
 import java.net.URLClassLoader
+import kotlin.util.measureTimeMillis
 
-val useStandardClassloader = true
+interface ClassLoaderFactory {
+    fun createLoaders(repo: File): List<Pair<String, ClassLoader>>
+}
 
-fun createClassLoader(files: List<File>, parent: ClassLoader): ClassLoader {
-    val urls = files.map { it.toURI().toURL() }.copyToArray()
-    if (useStandardClassloader) {
-        return URLClassLoader(urls, parent)
+class PerPluginClassLoader(val loaderFactory: (Array<File>,ClassLoader)->ClassLoader, val name: String): ClassLoaderFactory {
+    override fun createLoaders(repo: File): List<Pair<String, ClassLoader>> {
+        val platformLoader = loaderFactory(repo.listFiles {it.name.startsWith("platform")}!!, ClassLoader.getSystemClassLoader())
+        return repo.listFiles {it.name.startsWith("plugin")}!!.map {Pair(it.name, loaderFactory(arrayOf(it), platformLoader))}
+    }
+
+    override fun toString() = "$name per-plugin class loader"
+}
+
+class CommonClassLoader(val loaderFactory: (Array<File>, ClassLoader) -> ClassLoader, val name: String): ClassLoaderFactory {
+    override fun createLoaders(repo: File): List<Pair<String, ClassLoader>> {
+        val loader = loaderFactory(repo.listFiles()!!, ClassLoader.getSystemClassLoader())
+        return repo.listFiles {it.name.startsWith("plugin")}!!.map {Pair(it.name, loader)}
+    }
+
+    override fun toString() = "$name common class loader"
+}
+
+val standardPerPluginUrlClassLoader = PerPluginClassLoader(::createStandardUrlClassLoader, "standard")
+val ourPerPluginUrlClassLoader = PerPluginClassLoader(::createOurUrlClassLoader, "our")
+val standardCommonUrlClassLoader = CommonClassLoader(::createStandardUrlClassLoader, "standard")
+val ourCommonUrlClassLoader = CommonClassLoader(::createOurUrlClassLoader, "our")
+private val allKinds = listOf(standardPerPluginUrlClassLoader, ourPerPluginUrlClassLoader, standardCommonUrlClassLoader,
+        ourCommonUrlClassLoader)
+
+fun Array<File>.toJarRoots(): List<File> = map(::moduleRootToJarRoot)
+
+fun moduleRootToJarRoot(root: File) =
+    if (File(root, "classes").isDirectory()) {
+        File(root, "classes")
     }
     else {
-        return UrlClassLoader.build()!!.parent(parent)!!.urls(listOf(*urls))!!.allowLock()!!.useCache()!!.get()!!
+        File(root, "${root.name}.jar")
     }
+
+private fun createStandardUrlClassLoader(moduleRoots: Array<File>, parent: ClassLoader) =
+        URLClassLoader(moduleRoots.toJarRoots().map { it.toURI().toURL() }.toTypedArray(), parent)
+
+private fun createOurUrlClassLoader(moduleRoots: Array<File>, parent: ClassLoader): UrlClassLoader {
+    val urls = moduleRoots.toJarRoots().map { it.toURI().toURL() }.toTypedArray()
+    return UrlClassLoader.build().parent(parent).urls(listOf(*urls)).allowLock().useCache().get()
 }
 
-fun separateClassLoaders(jarsDir: File): List<Pair<String, ClassLoader>> {
-    val platformFiles = jarsDir.listFiles { it.name.startsWith("util") || it.name.startsWith("platform") }!!
-    val platformLoader = createClassLoader(listOf(*platformFiles), ClassLoader.getSystemClassLoader()!!)
-
-    return jarsDir.listFiles { it.name.startsWith("plugin") }!!.map { Pair(it.name.trimTrailing(".jar"), createClassLoader(listOf(it), platformLoader)) }
-}
-
-fun commonClassLoader(jarsDir: File): List<Pair<String, ClassLoader>> {
-    val allFiles = jarsDir.listFiles { it.name.endsWith(".jar") }!!
-    val loader = createClassLoader(listOf(*allFiles), ClassLoader.getSystemClassLoader()!!)
-
-    return jarsDir.listFiles { it.name.startsWith("plugin") }!!.map { Pair(it.name.trimTrailing(".jar"), loader) }
-}
-
-fun singleJarLoader(): List<Pair<String, ClassLoader>> {
-    val loader = createClassLoader(listOf(File("all.jar")), ClassLoader.getSystemClassLoader()!!)
-
-    return (1..50).map { Pair("plugin$it", loader) }
-}
-
-fun singleDirLoader(): List<Pair<String, ClassLoader>> {
-    val loader = createClassLoader(listOf(File("gen/util-classes")), ClassLoader.getSystemClassLoader()!!)
-
-    return listOf(Pair("util", loader))
-}
-
-fun main(args: Array<String>) {
-    val jarsDir = File("jars")
-    val plugins = singleDirLoader()
+fun test(repo: File, factory: ClassLoaderFactory) {
+    val counters = listOf(
+            sun.misc.PerfCounter.getFindClasses(),
+            sun.misc.PerfCounter.getFindClassTime(),
+            sun.misc.PerfCounter.getParentDelegationTime(),
+            sun.misc.PerfCounter.getReadClassBytesTime()
+    )
+    val plugins = factory.createLoaders(repo)
     val duration = measureTimeMillis {
         for ((moduleName, loader) in plugins) {
             val aClass = Class.forName("org.$moduleName.Entry", true, loader)
             aClass.newInstance()
         }
     }
-    println(sun.misc.PerfCounter.getFindClasses())
-    println(sun.misc.PerfCounter.getFindClassTime())
-    println(sun.misc.PerfCounter.getParentDelegationTime())
-    println(sun.misc.PerfCounter.getReadClassBytesTime())
-    println("${plugins.size} plugins loaded in ${duration}ms")
+    println("$factory: ${plugins.size()} plugins loaded in ${duration}ms")
+    counters.forEach {println(it)}
+    counters.forEach { it.set(0) }
+    println("==========")
+}
 
+fun main(args: Array<String>) {
+    repeat(2) {
+        allKinds.forEach {
+            test(File("repo"), it)
+        }
+    }
 }
 /*
 UrlClassLoader, separate jars, separate loaders:
