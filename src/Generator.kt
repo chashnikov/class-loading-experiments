@@ -23,6 +23,7 @@ private val packagesInPlugin = 10
 private val packagesInPlatformModule = 10
 private val subsystemsCount = 50
 private val pluginsCount = 50
+private val debug = false
 
 enum class LayoutKind {
     SINGLE_JAR, MANY_JARS, DIRECTORIES
@@ -30,7 +31,7 @@ enum class LayoutKind {
 
 class Generator(val outRoot: File, val layout: LayoutKind) {
     fun generate() {
-        println("Clearing output directory")
+        if (debug) println("Clearing output directory")
         FileUtil.delete(outRoot)
         val outputPaths = HashMap<String, File>()
         val platformModules = ArrayList<String>()
@@ -41,7 +42,7 @@ class Generator(val outRoot: File, val layout: LayoutKind) {
         }
         val pluginModules = (1..pluginsCount).map {"plugin$it"}
         pluginModules.forEachIndexed { i, name ->
-            val from = i % (subsystemsCount - 5)
+            val from = i % (subsystemsCount - 4)
             generateModuleClasses(name, packagesInPlugin, platformModules.subList(from, from+5), outputPaths)
         }
 
@@ -73,20 +74,21 @@ class Generator(val outRoot: File, val layout: LayoutKind) {
 
     private fun generateModuleClasses(moduleName: String, packages: Int, depModules: List<String>, outputPaths: MutableMap<String, File>): File {
         val sourcesRoot = createTempDir("module-$moduleName-src", "")
-        println("Generating $moduleName...")
+        if (debug) println("Generating $moduleName...")
         for (p in 1..packages) {
             val packageName = "org.$moduleName.pack$p"
             generateClass(sourcesRoot, "$packageName.Base", methods(10))
-            val impls = 1..classesInPackage
+            val impls = 1..classesInPackage-2
             for (i in impls) generateClass(sourcesRoot, "$packageName.Impl$i", methods(15), " extends Base")
-            generateClass(sourcesRoot, "$packageName.Container", impls.map { "public Impl$it impl$it = new Impl$it();" }.joinToString("\n"))
+            generateClass(sourcesRoot, "$packageName.Container", initMethod(impls.map { "Impl$it.init();" }))
+
         }
-        generateClass(sourcesRoot, "org.$moduleName.Entry", ((1..packages).map {
-            "public org.$moduleName.pack$it.Container container$it = new org.$moduleName.pack$it.Container();"
+        generateClass(sourcesRoot, "org.$moduleName.Entry", initMethod(((1..packages).map {
+            "org.$moduleName.pack$it.Container.init();"
         }
                 + depModules.map {
-            "public org.$it.Entry entry$it = new org.$it.Entry();"
-        }).joinToString("\n"))
+            "org.$it.Entry.init();"
+        })) + "\n{init();}")
 
         val compiler = ToolProvider.getSystemJavaCompiler()
         val toCompile = sourcesRoot.walkTopDown().toList().filter { it.isFile() }
@@ -105,13 +107,10 @@ class Generator(val outRoot: File, val layout: LayoutKind) {
             System.exit(1)
         }
         fileManager.close()
-//        File(classesDir, "deps.txt").writeText(depModules.joinToString("\n"))
-//        File(classesDir, "entries.txt").writeText("org.$moduleName.Entry")
         FileUtil.delete(sourcesRoot)
         outputPaths[moduleName] = classesDir
         return classesDir
     }
-
 }
 
 fun generateClass(outRoot: File, name: String, body: String, extends: String = "") {
@@ -126,4 +125,6 @@ ${body.split('\n').map { "    $it" }.joinToString("\n")}
 """)
 }
 
-fun methods(count: Int) = (1..count).map {"public void m$it(int p) {\n}"}.joinToString("\n")
+private fun initMethod(body: List<String>) = body.joinToString("\n", prefix = "public static void init(){\n", postfix = "}\n")
+
+private fun methods(count: Int) = (1..count).map {"public void m$it(int p) {\n}"}.joinToString("\n") + "\npublic static void init(){}"
