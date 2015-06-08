@@ -29,5 +29,6 @@
       </library>
     </orderEntry>
     <orderEntry type="module" module-name="dep" scope="PROVIDED" />
+    <orderEntry type="library" name="org.jboss.modules:jboss-modules:1.4.3.Final" level="project" />
   </component>
 </module>

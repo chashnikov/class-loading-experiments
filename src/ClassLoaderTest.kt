@@ -3,9 +3,14 @@
  */
 package classLoaders
 
+import com.intellij.openapi.util.io.FileUtil
 import com.intellij.util.lang.UrlClassLoader
+import generator.Generator
+import generator.LayoutKind
+import org.jboss.modules.ModuleIdentifier
+import org.jboss.modules.ModuleLoader
+import org.jboss.modules.MyLocalModuleFinder
 import java.io.File
-import java.net.URL
 import java.net.URLClassLoader
 import kotlin.util.measureTimeMillis
 
@@ -31,12 +36,28 @@ class CommonClassLoader(val loaderFactory: (Array<File>, ClassLoader) -> ClassLo
     override fun toString() = "$name common class loader"
 }
 
+class JBossPerModuleClassLoader : ClassLoaderFactory {
+    override fun createLoaders(repo: File): List<Pair<String, ClassLoader>> {
+        val loader = ModuleLoader(arrayOf(MyLocalModuleFinder(arrayOf(repo))))
+        return repo.listFiles { it.name.startsWith("plugin") }!!.map { Pair(it.name, loader.loadModule(ModuleIdentifier.create(it.name)).getClassLoader()) }
+    }
+}
+class JBossCommonClassLoader: ClassLoaderFactory {
+    override fun createLoaders(repo: File): List<Pair<String, ClassLoader>> {
+        val loader = ModuleLoader(arrayOf(MyLocalModuleFinder(arrayOf(repo.getParentFile()))))
+        val classLoader = loader.loadModule(ModuleIdentifier.create(repo.name)).getClassLoader()
+        return repo.listFiles { it.name.startsWith("plugin") }!!.map { Pair(it.name, classLoader) }
+    }
+}
+
+val jbossPerModuleClassLoader = JBossPerModuleClassLoader()
+val jbossCommonClassLoader = JBossCommonClassLoader()
 val standardPerPluginUrlClassLoader = PerPluginClassLoader(::createStandardUrlClassLoader, "standard")
 val ourPerPluginUrlClassLoader = PerPluginClassLoader(::createOurUrlClassLoader, "our")
 val standardCommonUrlClassLoader = CommonClassLoader(::createStandardUrlClassLoader, "standard")
 val ourCommonUrlClassLoader = CommonClassLoader(::createOurUrlClassLoader, "our")
 private val allKinds = listOf(standardPerPluginUrlClassLoader, ourPerPluginUrlClassLoader, standardCommonUrlClassLoader,
-        ourCommonUrlClassLoader)
+        ourCommonUrlClassLoader, jbossPerModuleClassLoader, jbossCommonClassLoader)
 
 fun Array<File>.toJarRoots(): List<File> = map(::moduleRootToJarRoot)
 
@@ -57,13 +78,15 @@ private fun createOurUrlClassLoader(moduleRoots: Array<File>, parent: ClassLoade
 }
 
 fun test(repo: File, factory: ClassLoaderFactory) {
+    val findClasses = sun.misc.PerfCounter.getFindClasses()
     val counters = listOf(
-            sun.misc.PerfCounter.getFindClasses(),
+            findClasses,
             sun.misc.PerfCounter.getFindClassTime(),
             sun.misc.PerfCounter.getParentDelegationTime(),
             sun.misc.PerfCounter.getReadClassBytesTime()
     )
-    val plugins = factory.createLoaders(repo)
+    var plugins = factory.createLoaders(repo)
+    counters.forEach { it.set(0) }
     val duration = measureTimeMillis {
         for ((moduleName, loader) in plugins) {
             val aClass = Class.forName("org.$moduleName.Entry", true, loader)
@@ -71,62 +94,27 @@ fun test(repo: File, factory: ClassLoaderFactory) {
         }
     }
     println("$factory: ${plugins.size()} plugins loaded in ${duration}ms")
-    counters.forEach {println(it)}
-    counters.forEach { it.set(0) }
-    println("==========")
+//    counters.filter{it!=findClasses}.forEach {println(it)}
+//    println("==========")
 }
 
 fun main(args: Array<String>) {
-    repeat(2) {
+//    test(File("repo"), jbossCommonClassLoader)
+    testAll()
+}
+
+private fun testAll() {
+    var i = 0
+    FileUtil.delete(File("repo"))
+    LayoutKind.values().forEach { layout ->
+        println("Layout: $layout")
         allKinds.forEach {
-            test(File("repo"), it)
+            i++
+            val repo = File("repo/repo$i")
+            Generator(repo, layout).generate()
+            test(repo, it)
         }
+        println("============")
     }
 }
-/*
-UrlClassLoader, separate jars, separate loaders:
-sun.classloader.findClasses = 3929
-sun.classloader.findClassTime = 829630482
-sun.classloader.parentDelegationTime = 661464219
-sun.urlClassLoader.readClassBytesTime = 15467969
-50 plugins loaded in 1444ms
-
-URLClassLoader, separate jars, separate loaders:
-sun.classloader.findClasses = 3810
-sun.classloader.findClassTime = 793675884
-sun.classloader.parentDelegationTime = 661767856
-sun.urlClassLoader.readClassBytesTime = 250237847
-50 plugins loaded in 1491ms
-
-UrlClassLoader, separate jars, single loader:
-sun.classloader.findClasses = 3929
-sun.classloader.findClassTime = 875458856
-sun.classloader.parentDelegationTime = 591688374
-sun.urlClassLoader.readClassBytesTime = 15442300
-50 plugins loaded in 1417ms
-
-URLClassLoader, separate jars, single loader
-sun.classloader.findClasses = 3810
-sun.classloader.findClassTime = 856273435
-sun.classloader.parentDelegationTime = 568003825
-sun.urlClassLoader.readClassBytesTime = 238703796
-50 plugins loaded in 1442ms
-
-UrlClassLoader, single jar:
-sun.classloader.findClasses = 3922
-sun.classloader.findClassTime = 837644812
-sun.classloader.parentDelegationTime = 587112273
-sun.urlClassLoader.readClassBytesTime = 15295192
-50 plugins loaded in 1379ms
-
-URLClassLoader, single jar
-sun.classloader.findClasses = 3810
-sun.classloader.findClassTime = 755237556
-sun.classloader.parentDelegationTime = 581553481
-sun.urlClassLoader.readClassBytesTime = 246043223
-50 plugins loaded in 1362ms
-
-
-
-*/
 

@@ -15,6 +15,7 @@ import javax.tools.JavaFileObject
 import javax.tools.ToolProvider
 
 fun main(args: Array<String>) {
+    debug = true
     Generator(File("repo"), LayoutKind.MANY_JARS).generate()
 }
 
@@ -23,7 +24,7 @@ private val packagesInPlugin = 10
 private val packagesInPlatformModule = 10
 private val subsystemsCount = 50
 private val pluginsCount = 50
-private val debug = false
+private var debug = false
 
 enum class LayoutKind {
     SINGLE_JAR, MANY_JARS, DIRECTORIES
@@ -34,6 +35,7 @@ class Generator(val outRoot: File, val layout: LayoutKind) {
         if (debug) println("Clearing output directory")
         FileUtil.delete(outRoot)
         val outputPaths = HashMap<String, File>()
+        val pluginDependencies = HashMap<String, List<String>>()
         val platformModules = ArrayList<String>()
         for (i in 1..subsystemsCount) {
             val name = "platform$i"
@@ -43,16 +45,41 @@ class Generator(val outRoot: File, val layout: LayoutKind) {
         val pluginModules = (1..pluginsCount).map {"plugin$it"}
         pluginModules.forEachIndexed { i, name ->
             val from = i % (subsystemsCount - 4)
-            generateModuleClasses(name, packagesInPlugin, platformModules.subList(from, from+5), outputPaths)
+            pluginDependencies[name] = platformModules.subList(from, from + 5)
+            generateModuleClasses(name, packagesInPlugin, pluginDependencies[name], outputPaths)
         }
 
+        val parentFile = outRoot.getAbsoluteFile().getParentFile()
         when (layout) {
-            LayoutKind.SINGLE_JAR -> packToJar("platform", platformModules)
-            LayoutKind.MANY_JARS -> platformModules.forEach {packToJar(it, listOf(it))}
-            else -> {}
-        }
-        if (layout != LayoutKind.DIRECTORIES) {
-            pluginModules.forEach { packToJar(it, listOf(it)) }
+            LayoutKind.SINGLE_JAR -> {
+                saveModulesXml(outRoot, "platform", emptyList())
+                packToJar("platform", platformModules)
+                pluginModules.forEach {
+                    saveModulesXml(outRoot, it, listOf("platform"))
+                    packToJar(it, listOf(it))
+                }
+                saveModulesXml(parentFile, outRoot.getName(), (listOf("platform") + pluginModules).map { "$it/$it.jar" }, emptyList())
+            }
+            LayoutKind.MANY_JARS -> {
+                platformModules.forEach {
+                    saveModulesXml(outRoot, it, emptyList())
+                    packToJar(it, listOf(it))
+                }
+                pluginModules.forEach {
+                    saveModulesXml(outRoot, it, pluginDependencies[it])
+                    packToJar(it, listOf(it))
+                }
+                saveModulesXml(parentFile, outRoot.getName(), (platformModules + pluginModules).map { "$it/$it.jar" }, emptyList())
+            }
+            else -> {
+                platformModules.forEach {
+                    saveModulesXml(outRoot, it, listOf("classes"), emptyList())
+                }
+                pluginModules.forEach {
+                    saveModulesXml(outRoot, it, listOf("classes"), pluginDependencies[it])
+                }
+                saveModulesXml(parentFile, outRoot.getName(), (platformModules + pluginModules).map { "$it/classes" }, emptyList())
+            }
         }
     }
 
@@ -128,3 +155,30 @@ ${body.split('\n').map { "    $it" }.joinToString("\n")}
 private fun initMethod(body: List<String>) = body.joinToString("\n", prefix = "public static void init(){\n", postfix = "}\n")
 
 private fun methods(count: Int) = (1..count).map {"public void m$it(int p) {\n}"}.joinToString("\n") + "\npublic static void init(){}"
+
+private fun saveModulesXml(repo: File, name: String, dependencies: List<String>) {
+    saveModulesXml(repo, name, listOf("$name.jar"), dependencies)
+}
+
+private fun saveModulesXml(repo: File, name: String, roots: List<String>, dependencies: List<String>) {
+    val moduleFile = File(repo, "$name/module.xml")
+    FileUtil.createParentDirs(moduleFile)
+    moduleFile.writeText("""
+<?xml version="1.0" encoding="UTF-8"?>
+<module xmlns="urn:jboss:module:1.1" name="$name">
+    <resources>
+${roots.map {
+"""              <resource-root path="$it"/>
+"""
+    }.joinToString("")
+    }
+    </resources>
+    <dependencies>
+${dependencies.map {
+        """      <module name="$it"/>
+"""}.joinToString("")
+    }
+    </dependencies>
+</module>
+""")
+}
